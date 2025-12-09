@@ -10,31 +10,50 @@ from email import encoders
 from datetime import datetime
 
 # --- 設定頁面資訊 ---
-st.set_page_config(page_title="音檔切割與寄送系統 (V7)", page_icon="📮", layout="wide")
+st.set_page_config(page_title="音檔切割與寄送系統 (V8)", page_icon="📮", layout="wide")
 st.title("📮 智慧音檔切割與寄送系統")
-st.caption("🚀 核心 V7：新增「寄送狀態紀錄表」與「緊急中斷提示」。")
+st.caption("🚀 核心 V8：新增「永久歷史紀錄資料庫」與「手機版操作優化」。")
 
 # 設定分割門檻 (MB)
 SPLIT_LIMIT_MB = 10 
+LOG_FILE = "history_log.csv"
 
-# --- 初始化 Session State (記憶體) ---
-if 'mail_log' not in st.session_state:
-    st.session_state['mail_log'] = []
-if 'last_uploaded_file_id' not in st.session_state:
-    st.session_state['last_uploaded_file_id'] = None
+# --- 核心邏輯：永久紀錄系統 ---
+def load_log():
+    """從 CSV 檔案讀取歷史紀錄"""
+    if os.path.exists(LOG_FILE):
+        return pd.read_csv(LOG_FILE)
+    else:
+        return pd.DataFrame(columns=["日期時間", "收件者信箱", "狀態", "詳細訊息"])
 
 def add_log(recipient, status, message):
-    """寫入操作紀錄到表格中"""
+    """寫入操作紀錄到 CSV (永久保存)"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # 將新紀錄插入到最上方 (Index 0)
-    st.session_state['mail_log'].insert(0, {
+    new_data = {
         "日期時間": now,
         "收件者信箱": recipient,
         "狀態": status,
         "詳細訊息": message
-    })
+    }
+    
+    # 讀取舊資料 -> 加入新資料 -> 存檔
+    df = load_log()
+    # 使用 concat 取代 append (新版 pandas 規範)
+    df = pd.concat([pd.DataFrame([new_data]), df], ignore_index=True)
+    df.to_csv(LOG_FILE, index=False)
+    
+    # 更新 Session State 以便即時顯示
+    st.session_state['mail_log_df'] = df
 
-# --- 核心邏輯函式區 (維持 V6 的穩定邏輯) ---
+# --- 初始化 Session State ---
+if 'mail_log_df' not in st.session_state:
+    st.session_state['mail_log_df'] = load_log()
+if 'last_uploaded_file_id' not in st.session_state:
+    st.session_state['last_uploaded_file_id'] = None
+if 'generated_files' not in st.session_state:
+    st.session_state['generated_files'] = []
+
+# --- 核心邏輯函式區 (維持穩定) ---
 
 def get_audio_info(file_path):
     try:
@@ -58,7 +77,7 @@ def split_audio_ffmpeg(input_path, target_size_mb=9.5):
         file_ext = ".mp3"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     
-    # 小檔案處理：直接另存為 Part000
+    # 小檔案處理
     if size_bytes <= target_bytes:
         output_name = f"rec_{timestamp}_part000{file_ext}"
         try:
@@ -73,7 +92,7 @@ def split_audio_ffmpeg(input_path, target_size_mb=9.5):
             st.error(f"處理失敗: {str(e)}")
             return []
 
-    # 大檔案切割邏輯
+    # 大檔案切割
     avg_bitrate = size_bytes / duration
     segment_time = (target_bytes / avg_bitrate) * 0.95
     output_pattern = f"rec_{timestamp}_part%03d{file_ext}"
@@ -124,16 +143,19 @@ def send_email(to_email, selected_files, sender_email, sender_password):
 
 with st.sidebar:
     st.header("⚙️ 設定與工具")
-    if st.button("🗑️ 清空歷史紀錄"):
-        st.session_state['mail_log'] = []
+    
+    # 需求 3：清除重來 (只清空檔案，不刪紀錄)
+    if st.button("🔄 清除重來 (Start Over)", type="primary"):
+        # 清空 session state 中的檔案相關變數
+        st.session_state['generated_files'] = []
+        st.session_state['last_uploaded_file_id'] = None
+        # 強制重新執行頁面
         st.rerun()
-    st.info("💡 **操作提示：**\n如需重新上傳檔案，請直接點擊上傳區的 X 按鈕或重新整理網頁。")
+        
+    st.info("💡 **操作提示：**\n點擊上方「清除重來」可刪除當前上傳的檔案並重新開始。歷史紀錄將永久保存。")
 
 # 第一步：上傳
 uploaded_file = st.file_uploader(f"第一步：上傳錄音檔 (若超過 {SPLIT_LIMIT_MB}MB 將自動分割)", type=None)
-
-if 'generated_files' not in st.session_state:
-    st.session_state['generated_files'] = []
 
 if uploaded_file is not None:
     # 檢測新檔案
@@ -157,19 +179,18 @@ if uploaded_file is not None:
             files = split_audio_ffmpeg(temp_filename, target_size_mb=SPLIT_LIMIT_MB - 0.5)
             if files:
                 st.session_state['generated_files'] = files
-                st.success(f"處理完成！準備寄送。")
+                st.success(f"處理完成！")
             if os.path.exists(temp_filename):
                 os.remove(temp_filename)
 
-# 第二、三步：寄送介面
+# 第二、三步
 if st.session_state['generated_files']:
     st.divider()
     
     valid_files = [f for f in st.session_state['generated_files'] if os.path.exists(f)]
     
     if not valid_files:
-        st.warning("⚠️ 暫存檔案已過期，請重新上傳。")
-        st.session_state['generated_files'] = []
+        st.warning("⚠️ 檔案已清除，請按左側「清除重來」按鈕。")
     else:
         col1, col2 = st.columns([1, 1])
         
@@ -185,26 +206,28 @@ if st.session_state['generated_files']:
             st.subheader("第三步：寄送設定")
             recipient_email = st.text_input("收件者信箱", placeholder="name@example.com")
             
-            # --- 寄送按鈕區 ---
+            # 需求 2：停止鍵說明 (手機友善版)
             if st.button("🚀 確認寄送檔案", type="primary", use_container_width=True):
                 if not recipient_email:
                     st.warning("⚠️ 請輸入 Email")
                 elif not selected_files:
                     st.warning("⚠️ 請選擇檔案")
                 else:
-                    # 使用 status 顯示進度
-                    status_container = st.status("🚀 系統運作中...", expanded=True)
-                    
+                    status_container = st.status("🚀 準備開始...", expanded=True)
                     try:
-                        # 顯示明顯的停止提示
-                        status_container.warning("⚠️ 正在傳輸資料，請勿關閉視窗...")
-                        status_container.error("🛑 若需【緊急終止】寄送，請直接按鍵盤 **F5** 或瀏覽器重新整理。")
+                        # 明顯的紅色停止區塊
+                        status_container.error("🛑 **【如何停止寄送？】**")
+                        status_container.markdown("""
+                        - **電腦版**：請按鍵盤 **F5**。
+                        - **手機版**：請點擊瀏覽器網址列旁的 **「重新整理 (⟳)」** 或 **「停止 (X)」** 圖示。
+                        *(歷史紀錄將會自動保存)*
+                        """)
                         
                         if "email" in st.secrets:
                             sender_email = st.secrets["email"]["username"]
                             sender_password = st.secrets["email"]["password"]
                             
-                            status_container.write("📤 正在上傳附件並連線 Gmail...")
+                            status_container.write("📤 正在上傳附件並連線...")
                             
                             success, msg = send_email(recipient_email, selected_files, sender_email, sender_password)
                             
@@ -218,26 +241,27 @@ if st.session_state['generated_files']:
                                 add_log(recipient_email, "🔴 失敗", msg)
                         else:
                             status_container.update(label="❌ 設定錯誤", state="error")
-                            st.error("找不到 Secrets 設定")
+                            st.error("Secrets 設定遺失")
                             add_log(recipient_email, "🔴 設定錯誤", "Secrets 未設定")
                             
                     except Exception as e:
-                        status_container.update(label="❌ 發生意外錯誤", state="error")
-                        st.error(f"系統錯誤: {e}")
-                        add_log(recipient_email, "⚫ 系統錯誤", str(e))
+                        status_container.update(label="❌ 中斷/錯誤", state="error")
+                        add_log(recipient_email, "⚫ 中斷/錯誤", "使用者手動終止或連線錯誤")
 
 # --- 歷史紀錄表單區 ---
 st.divider()
-st.subheader("📋 寄送歷史紀錄表")
+col_hist, col_btn = st.columns([8, 2])
+with col_hist:
+    st.subheader("📋 寄送歷史紀錄 (永久保存)")
 
-if st.session_state['mail_log']:
-    # 將資料轉為 DataFrame 以顯示表格
-    df_log = pd.DataFrame(st.session_state['mail_log'])
-    
+# 讀取並顯示 CSV 中的資料
+df_display = load_log()
+
+if not df_display.empty:
     st.dataframe(
-        df_log,
+        df_display,
         use_container_width=True,
-        hide_index=True,  # 隱藏前面的 0,1,2 索引
+        hide_index=True,
         column_config={
             "日期時間": st.column_config.TextColumn("日期時間", width="medium"),
             "收件者信箱": st.column_config.TextColumn("收件者信箱", width="medium"),
@@ -246,4 +270,4 @@ if st.session_state['mail_log']:
         }
     )
 else:
-    st.markdown("*目前尚無寄送紀錄 (無論成功或失敗都會顯示於此)*")
+    st.info("尚無寄送紀錄。")
