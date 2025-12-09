@@ -10,9 +10,12 @@ from email import encoders
 from datetime import datetime
 
 # 設定頁面資訊
-st.set_page_config(page_title="音檔切割與寄送系統 (V5 穩定版)", page_icon="📮", layout="wide")
+st.set_page_config(page_title="音檔切割與寄送系統 (V6)", page_icon="📮", layout="wide")
 st.title("📮 智慧音檔切割與寄送系統")
-st.caption("🚀 核心 V5：修復換檔無法更新的問題，並強化狀態監控。")
+st.caption("🚀 核心 V6：修復小檔案無法顯示的問題，優化流程體驗。")
+
+# 設定分割門檻 (MB)
+SPLIT_LIMIT_MB = 10 
 
 # --- 初始化 Session State ---
 if 'mail_log' not in st.session_state:
@@ -48,17 +51,33 @@ def split_audio_ffmpeg(input_path, target_size_mb=9.5):
         return []
 
     target_bytes = target_size_mb * 1024 * 1024
-    if size_bytes <= target_bytes:
-        return [input_path]
-
-    avg_bitrate = size_bytes / duration
-    segment_time = (target_bytes / avg_bitrate) * 0.95
     
+    # 準備通用變數 (檔名、時間戳)
     file_ext = os.path.splitext(input_path)[1].lower()
     if not file_ext or len(file_ext) < 2:
         file_ext = ".mp3"
-        
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    
+    # --- 關鍵修正：小檔案處理邏輯 ---
+    # 即使不分割，也要另存新檔 (Part000)，避免原始檔被刪除後導致消失
+    if size_bytes <= target_bytes:
+        output_name = f"rec_{timestamp}_part000{file_ext}"
+        try:
+            # 使用 ffmpeg copy 模式進行快速另存，確保格式統一
+            (
+                ffmpeg
+                .input(input_path)
+                .output(output_name, c='copy')
+                .run(quiet=True, overwrite_output=True)
+            )
+            return [output_name]
+        except ffmpeg.Error as e:
+            st.error(f"處理失敗: {str(e)}")
+            return []
+
+    # --- 大檔案分割邏輯 ---
+    avg_bitrate = size_bytes / duration
+    segment_time = (target_bytes / avg_bitrate) * 0.95
     output_pattern = f"rec_{timestamp}_part%03d{file_ext}"
     
     try:
@@ -110,45 +129,42 @@ with st.sidebar:
     if st.button("🗑️ 清空所有歷史紀錄"):
         st.session_state['mail_log'] = []
         st.rerun()
-    # 這個重置按鈕保留備用，但現在主程式會自動重置
-    if st.button("🔄 強制重置狀態"):
-        if 'generated_files' in st.session_state:
-            del st.session_state['generated_files']
-        st.session_state['last_uploaded_file_id'] = None
-        st.rerun()
     st.info("💡 **關於停止鍵：**\n若要強制停止寄信，請直接按瀏覽器的「重新整理 (F5)」。")
 
-# 上傳區
-uploaded_file = st.file_uploader("第一步：上傳錄音檔", type=None)
+# 上傳區 (依需求更新文字說明)
+uploaded_file = st.file_uploader(f"第一步：上傳錄音檔 (若超過 {SPLIT_LIMIT_MB}MB 將自動分割)", type=None)
 
 if 'generated_files' not in st.session_state:
     st.session_state['generated_files'] = []
 
 if uploaded_file is not None:
-    # --- 關鍵修復：檢測是否換了新檔案 ---
-    # 建立一個檔案的唯一識別碼 (檔名 + 大小)
+    # 檢測新檔案
     current_file_id = f"{uploaded_file.name}-{uploaded_file.size}"
     
-    # 如果這個檔案跟上次處理的不一樣，就清空舊資料，強制重新切割
     if st.session_state['last_uploaded_file_id'] != current_file_id:
-        st.session_state['generated_files'] = []  # 清空舊檔案列表
-        st.session_state['last_uploaded_file_id'] = current_file_id # 更新識別碼
+        st.session_state['generated_files'] = []
+        st.session_state['last_uploaded_file_id'] = current_file_id 
     
-    # --- 處理邏輯 ---
+    # 處理邏輯
     original_ext = os.path.splitext(uploaded_file.name)[1].lower()
     if not original_ext: original_ext = ".mp3"
     temp_filename = f"temp_input{original_ext}"
     
-    # 只有當列表為空時 (代表是新檔案或剛重置)，才執行切割
     if not st.session_state['generated_files']:
         with open(temp_filename, "wb") as f:
             f.write(uploaded_file.getbuffer())   
-        with st.spinner(f'🚀 偵測到新檔案，正在切割 {uploaded_file.name} ...'):
-            files = split_audio_ffmpeg(temp_filename)
+        
+        # 根據檔案大小顯示不同的提示訊息
+        msg = f'🚀 檔案較大，正在分割 {uploaded_file.name} ...' if uploaded_file.size > SPLIT_LIMIT_MB * 1024 * 1024 else f'🚀 正在處理 {uploaded_file.name} ...'
+        
+        with st.spinner(msg):
+            # 傳入設定的 10MB 限制
+            files = split_audio_ffmpeg(temp_filename, target_size_mb=SPLIT_LIMIT_MB - 0.5)
             if files:
                 st.session_state['generated_files'] = files
-                st.success(f"切割完成！共 {len(files)} 個檔案。")
+                st.success(f"處理完成！準備寄送。")
             
+            # 安全刪除暫存檔 (因為我們已經另存了 Part 檔案，所以這裡刪除是安全的)
             if os.path.exists(temp_filename):
                 os.remove(temp_filename)
 
@@ -156,14 +172,11 @@ if uploaded_file is not None:
 if st.session_state['generated_files']:
     st.divider()
     
-    # 再次檢查檔案是否存在 (防止檔案被系統清除導致報錯)
     valid_files = [f for f in st.session_state['generated_files'] if os.path.exists(f)]
     
     if not valid_files:
-        st.warning("⚠️ 暫存檔案已過期或遺失，請重新上傳檔案。")
-        # 自動清理狀態以便使用者直接重傳
+        st.warning("⚠️ 暫存檔案已過期，請按左側「重置」或重新上傳。")
         st.session_state['generated_files'] = []
-        st.session_state['last_uploaded_file_id'] = None
     else:
         col1, col2 = st.columns([1, 1])
         
