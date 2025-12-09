@@ -1,207 +1,136 @@
 import streamlit as st
-import os
 from pydub import AudioSegment
-import math
 import io
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email import encoders
+import os
 from datetime import datetime
 
-# --- 設定頁面：標題與佈局 ---
-st.set_page_config(page_title="音訊切割助手", page_icon="📱", layout="centered")
+# 設定頁面資訊
+st.set_page_config(page_title="音檔切割小幫手", page_icon="✂️")
 
-# --- CSS 優化 (針對手機微調) ---
-st.markdown("""
-    <style>
-    .stButton>button {
-        height: 3em;
-        font-weight: bold;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+st.title("✂️ 智慧音檔切割與寄送系統")
 
-# --- 初始化 Session State ---
-if 'is_logged_in' not in st.session_state:
-    st.session_state['is_logged_in'] = False
-if 'user_credentials' not in st.session_state:
-    st.session_state['user_credentials'] = {}
-if 'processed_files' not in st.session_state:
-    st.session_state['processed_files'] = []
+# --- 新增：提示訊息，防止瀏覽器翻譯導致錯誤 ---
+st.caption("💡 提示：若介面出現 'removeChild' 錯誤，請務必 **關閉瀏覽器的自動翻譯功能** 並重新整理網頁。")
+st.markdown("---")
 
-# --- 核心邏輯函數 ---
-def try_login(email, password):
-    try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(email, password)
-        server.quit()
-        return True, "驗證成功"
-    except Exception as e:
-        return False, f"登入失敗: {str(e)}"
+# --- 邏輯函式區 ---
 
-def split_audio(uploaded_file, target_size_mb=9.5):
-    """
-    切割並重新命名：[案號] [空格] [001]
-    """
-    audio = AudioSegment.from_file(uploaded_file)
-    file_size = uploaded_file.size
-    duration_ms = len(audio)
-    target_size_bytes = target_size_mb * 1024 * 1024
+def split_audio(audio_file):
+    """將音訊切割成小於目標大小的片段 (預設接近 10MB)"""
+    # 讀取音訊
+    audio = AudioSegment.from_file(audio_file)
+    
+    # 計算檔案大小與長度
+    # 設定目標為 9.5MB 以確保不超過 10MB 限制
+    limit_bytes = 9.5 * 1024 * 1024
+    
+    # 取得音訊的位元率 (byte per millisecond)
+    byte_rate = audio.frame_rate * audio.sample_width * audio.channels / 1000
+    
+    # 計算每個片段的最大毫秒數
+    chunk_length_ms = int(limit_bytes / byte_rate)
     
     chunks = []
-    # 取得原始檔名 (不含副檔名)，作為案號
-    base_name = os.path.splitext(uploaded_file.name)[0]
-    export_format = "mp3" 
-
-    if file_size <= target_size_bytes:
-        # 即使不切割，也統一加上 001
-        buffer = io.BytesIO()
-        audio.export(buffer, format=export_format)
-        chunks.append({
-            "name": f"{base_name} 001.{export_format}", 
-            "data": buffer.getvalue()
-        })
-    else:
-        num_parts = math.ceil(file_size / target_size_bytes)
-        chunk_length_ms = math.ceil(duration_ms / num_parts)
+    # 切割迴圈
+    for i in range(0, len(audio), chunk_length_ms):
+        chunk = audio[i : i + chunk_length_ms]
+        chunks.append(chunk)
         
-        st.toast(f"檔案較大，正在切割成 {num_parts} 份...", icon="🔪")
-
-        for i in range(num_parts):
-            start_time = i * chunk_length_ms
-            end_time = min((i + 1) * chunk_length_ms, duration_ms)
-            chunk = audio[start_time:end_time]
-            buffer = io.BytesIO()
-            chunk.export(buffer, format=export_format)
-            
-            # 命名規則：原檔名 + 空格 + 三位數編碼
-            timestamp_idx = i + 1
-            file_name = f"{base_name} {timestamp_idx:03d}.{export_format}"
-            
-            chunks.append({
-                "name": file_name,
-                "data": buffer.getvalue()
-            })
     return chunks
 
-def send_email(sender_email, sender_password, receiver_email, subject, body, files_to_send):
+def send_email(to_email, selected_files, sender_email, sender_password):
+    """發送帶有附件的 Email"""
     msg = MIMEMultipart()
     msg['From'] = sender_email
-    msg['To'] = receiver_email
-    msg['Subject'] = subject
+    msg['To'] = to_email
+    msg['Subject'] = "您的音訊檔案片段"
+    
+    body = "您好，這是您選擇的音訊切割檔案，請查收。"
     msg.attach(MIMEText(body, 'plain'))
 
-    for file_info in files_to_send:
+    for filename, file_bytes in selected_files:
         part = MIMEBase('application', 'octet-stream')
-        part.set_payload(file_info['data'])
+        part.set_payload(file_bytes)
         encoders.encode_base64(part)
-        part.add_header('Content-Disposition', f'attachment; filename= {file_info["name"]}')
+        part.add_header('Content-Disposition', f"attachment; filename= {filename}")
         msg.attach(part)
 
     try:
+        # 使用 Gmail SMTP
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(sender_email, sender_password)
         text = msg.as_string()
-        server.sendmail(sender_email, receiver_email, text)
+        server.sendmail(sender_email, to_email, text)
         server.quit()
-        return True, "成功寄出！"
+        return True, "發送成功！"
     except Exception as e:
-        return False, f"失敗: {str(e)}"
+        return False, str(e)
 
-# ================= 介面流程 =================
+# --- 使用者介面區 ---
 
-st.title("📱 音訊切割寄信助手")
+uploaded_file = st.file_uploader("第一步：上傳錄音檔 (支援 mp3, wav, m4a)", type=['mp3', 'wav', 'm4a'])
 
-# --- Step 1: 登入 ---
-if not st.session_state['is_logged_in']:
-    st.warning("請先連結 Gmail")
-    
-    with st.container(border=True):
-        email_input = st.text_input("Gmail 帳號", placeholder="example@gmail.com")
-        pwd_input = st.text_input("應用程式密碼", type="password")
-        st.caption("⚠️ 請至 Google 帳戶 > 安全性 > 申請「應用程式密碼」(非登入密碼)")
+# 初始化 session state
+if 'chunks_data' not in st.session_state:
+    st.session_state['chunks_data'] = []
+
+if uploaded_file is not None:
+    # 若 session 為空則執行切割
+    if not st.session_state['chunks_data']:
+        with st.spinner('正在分析並切割音檔，請稍候...'):
+            try:
+                chunks = split_audio(uploaded_file)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+                
+                for idx, chunk in enumerate(chunks):
+                    # 將 chunk 轉回 bytes
+                    buf = io.BytesIO()
+                    chunk.export(buf, format="mp3")
+                    file_name = f"rec_{timestamp}_part{idx+1}.mp3"
+                    st.session_state['chunks_data'].append((file_name, buf.getvalue()))
+                
+                st.success(f"切割完成！共產生 {len(chunks)} 個檔案。")
+            except Exception as e:
+                st.error(f"處理檔案時發生錯誤：{e}")
+
+    # 第二步：顯示與選擇
+    if st.session_state['chunks_data']:
+        st.subheader("第二步：選擇要寄送的片段")
         
-        if st.button("🔗 連結並登入", type="primary", use_container_width=True):
-            if not email_input or not pwd_input:
-                st.error("請輸入完整資訊")
+        selected_options = []
+        # 使用 enumerate 確保 key 唯一，防止介面錯誤
+        for idx, (name, data) in enumerate(st.session_state['chunks_data']):
+            if st.checkbox(f"{name} ({len(data)/1024/1024:.2f} MB)", value=True, key=f"chk_{idx}"):
+                selected_options.append((name, data))
+        
+        st.subheader("第三步：輸入收件資訊")
+        recipient_email = st.text_input("收件者信箱")
+        
+        if st.button("寄送檔案"):
+            if not recipient_email:
+                st.warning("請輸入 Email 地址")
+            elif not selected_options:
+                st.warning("請至少選擇一個檔案")
             else:
-                with st.spinner("連線中..."):
-                    success, msg = try_login(email_input, pwd_input)
-                    if success:
-                        st.session_state['is_logged_in'] = True
-                        st.session_state['user_credentials'] = {'email': email_input, 'pwd': pwd_input}
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-
-else:
-    # --- 已登入狀態 ---
-    with st.expander(f"👤 已登入: {st.session_state['user_credentials']['email']}", expanded=False):
-        if st.button("登出切換帳號", use_container_width=True):
-            st.session_state['is_logged_in'] = False
-            st.session_state['user_credentials'] = {}
-            st.session_state['processed_files'] = []
-            st.rerun()
-
-    st.markdown("---")
-
-    # --- Step 2: 上傳 ---
-    st.subheader("1. 上傳錄音檔")
-    uploaded_file = st.file_uploader("點擊上傳 (支援 mp3, wav, m4a...)", type=['mp3', 'wav', 'm4a', 'ogg'], label_visibility="collapsed")
-    
-    if uploaded_file:
-        st.caption(f"檔案: {uploaded_file.name} | 大小: {uploaded_file.size/(1024*1024):.1f} MB")
-        
-        if st.button("✂️ 開始處理 / 切割", type="primary", use_container_width=True):
-            with st.spinner("正在處理音訊..."):
+                # 從 Secrets 讀取帳密
                 try:
-                    chunks = split_audio(uploaded_file)
-                    st.session_state['processed_files'] = chunks
-                    st.toast(f"處理完成！共 {len(chunks)} 個檔案", icon="✅")
-                except Exception as e:
-                    st.error(f"錯誤: {e}")
-
-    # --- Step 3: 寄送 ---
-    if st.session_state['processed_files']:
-        st.markdown("---")
-        st.subheader("2. 寄送檔案")
-        
-        with st.container(border=True):
-            # 檔案選擇
-            all_filenames = [f['name'] for f in st.session_state['processed_files']]
-            selected_files = st.multiselect("選擇附件", options=all_filenames, default=all_filenames)
-            st.caption(f"已選 {len(selected_files)} 個檔案")
-            
-            # 收件資訊
-            receiver_email = st.text_input("收件者 Email", placeholder="receiver@example.com")
-            email_subject = st.text_input("信件主旨", value=f"錄音檔 ({datetime.now().strftime('%m/%d')})")
-            
-            st.markdown("<br>", unsafe_allow_html=True)
-            
-            if st.button("🚀 確認發送郵件", type="primary", use_container_width=True):
-                if not receiver_email:
-                    st.toast("請填寫收件人！", icon="⚠️")
-                elif not selected_files:
-                    st.toast("請至少選一個檔案！", icon="⚠️")
-                else:
-                    files_payload = [f for f in st.session_state['processed_files'] if f['name'] in selected_files]
+                    sender_email = st.secrets["email"]["username"]
+                    sender_password = st.secrets["email"]["password"]
                     
-                    with st.spinner("郵件發送中..."):
-                        success, msg = send_email(
-                            st.session_state['user_credentials']['email'],
-                            st.session_state['user_credentials']['pwd'],
-                            receiver_email,
-                            email_subject,
-                            "附件為切割後的音檔，請查收。",
-                            files_payload
-                        )
+                    with st.spinner("正在寄信中..."):
+                        success, msg = send_email(recipient_email, selected_options, sender_email, sender_password)
                         if success:
-                            st.success("✅ 寄送成功！")
                             st.balloons()
+                            st.success(msg)
                         else:
-                            st.error(msg)
+                            st.error(f"寄送失敗：{msg}")
+                except FileNotFoundError:
+                     st.error("找不到 Secrets 設定。請在 Streamlit Cloud 設定 Email 帳密。")
+                except KeyError:
+                     st.error("Secrets 格式錯誤。請確認包含 [email] 區塊以及 username 和 password。")
