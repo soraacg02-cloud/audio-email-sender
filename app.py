@@ -9,23 +9,24 @@ from email.mime.text import MIMEText
 from email import encoders
 from datetime import datetime
 
-# 設定頁面資訊
-st.set_page_config(page_title="音檔切割與寄送系統 (V6)", page_icon="📮", layout="wide")
+# --- 設定頁面資訊 ---
+st.set_page_config(page_title="音檔切割與寄送系統 (V7)", page_icon="📮", layout="wide")
 st.title("📮 智慧音檔切割與寄送系統")
-st.caption("🚀 核心 V6：修復小檔案無法顯示的問題，優化流程體驗。")
+st.caption("🚀 核心 V7：新增「寄送狀態紀錄表」與「緊急中斷提示」。")
 
 # 設定分割門檻 (MB)
 SPLIT_LIMIT_MB = 10 
 
-# --- 初始化 Session State ---
+# --- 初始化 Session State (記憶體) ---
 if 'mail_log' not in st.session_state:
     st.session_state['mail_log'] = []
 if 'last_uploaded_file_id' not in st.session_state:
     st.session_state['last_uploaded_file_id'] = None
 
 def add_log(recipient, status, message):
-    """寫入操作紀錄"""
+    """寫入操作紀錄到表格中"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 將新紀錄插入到最上方 (Index 0)
     st.session_state['mail_log'].insert(0, {
         "日期時間": now,
         "收件者信箱": recipient,
@@ -33,7 +34,7 @@ def add_log(recipient, status, message):
         "詳細訊息": message
     })
 
-# --- 核心邏輯函式區 ---
+# --- 核心邏輯函式區 (維持 V6 的穩定邏輯) ---
 
 def get_audio_info(file_path):
     try:
@@ -52,18 +53,15 @@ def split_audio_ffmpeg(input_path, target_size_mb=9.5):
 
     target_bytes = target_size_mb * 1024 * 1024
     
-    # 準備通用變數 (檔名、時間戳)
     file_ext = os.path.splitext(input_path)[1].lower()
     if not file_ext or len(file_ext) < 2:
         file_ext = ".mp3"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     
-    # --- 關鍵修正：小檔案處理邏輯 ---
-    # 即使不分割，也要另存新檔 (Part000)，避免原始檔被刪除後導致消失
+    # 小檔案處理：直接另存為 Part000
     if size_bytes <= target_bytes:
         output_name = f"rec_{timestamp}_part000{file_ext}"
         try:
-            # 使用 ffmpeg copy 模式進行快速另存，確保格式統一
             (
                 ffmpeg
                 .input(input_path)
@@ -75,7 +73,7 @@ def split_audio_ffmpeg(input_path, target_size_mb=9.5):
             st.error(f"處理失敗: {str(e)}")
             return []
 
-    # --- 大檔案分割邏輯 ---
+    # 大檔案切割邏輯
     avg_bitrate = size_bytes / duration
     segment_time = (target_bytes / avg_bitrate) * 0.95
     output_pattern = f"rec_{timestamp}_part%03d{file_ext}"
@@ -126,12 +124,12 @@ def send_email(to_email, selected_files, sender_email, sender_password):
 
 with st.sidebar:
     st.header("⚙️ 設定與工具")
-    if st.button("🗑️ 清空所有歷史紀錄"):
+    if st.button("🗑️ 清空歷史紀錄"):
         st.session_state['mail_log'] = []
         st.rerun()
-    st.info("💡 **關於停止鍵：**\n若要強制停止寄信，請直接按瀏覽器的「重新整理 (F5)」。")
+    st.info("💡 **操作提示：**\n如需重新上傳檔案，請直接點擊上傳區的 X 按鈕或重新整理網頁。")
 
-# 上傳區 (依需求更新文字說明)
+# 第一步：上傳
 uploaded_file = st.file_uploader(f"第一步：上傳錄音檔 (若超過 {SPLIT_LIMIT_MB}MB 將自動分割)", type=None)
 
 if 'generated_files' not in st.session_state:
@@ -145,7 +143,6 @@ if uploaded_file is not None:
         st.session_state['generated_files'] = []
         st.session_state['last_uploaded_file_id'] = current_file_id 
     
-    # 處理邏輯
     original_ext = os.path.splitext(uploaded_file.name)[1].lower()
     if not original_ext: original_ext = ".mp3"
     temp_filename = f"temp_input{original_ext}"
@@ -154,28 +151,24 @@ if uploaded_file is not None:
         with open(temp_filename, "wb") as f:
             f.write(uploaded_file.getbuffer())   
         
-        # 根據檔案大小顯示不同的提示訊息
         msg = f'🚀 檔案較大，正在分割 {uploaded_file.name} ...' if uploaded_file.size > SPLIT_LIMIT_MB * 1024 * 1024 else f'🚀 正在處理 {uploaded_file.name} ...'
         
         with st.spinner(msg):
-            # 傳入設定的 10MB 限制
             files = split_audio_ffmpeg(temp_filename, target_size_mb=SPLIT_LIMIT_MB - 0.5)
             if files:
                 st.session_state['generated_files'] = files
                 st.success(f"處理完成！準備寄送。")
-            
-            # 安全刪除暫存檔 (因為我們已經另存了 Part 檔案，所以這裡刪除是安全的)
             if os.path.exists(temp_filename):
                 os.remove(temp_filename)
 
-# 寄送與紀錄邏輯
+# 第二、三步：寄送介面
 if st.session_state['generated_files']:
     st.divider()
     
     valid_files = [f for f in st.session_state['generated_files'] if os.path.exists(f)]
     
     if not valid_files:
-        st.warning("⚠️ 暫存檔案已過期，請按左側「重置」或重新上傳。")
+        st.warning("⚠️ 暫存檔案已過期，請重新上傳。")
         st.session_state['generated_files'] = []
     else:
         col1, col2 = st.columns([1, 1])
@@ -192,19 +185,26 @@ if st.session_state['generated_files']:
             st.subheader("第三步：寄送設定")
             recipient_email = st.text_input("收件者信箱", placeholder="name@example.com")
             
+            # --- 寄送按鈕區 ---
             if st.button("🚀 確認寄送檔案", type="primary", use_container_width=True):
                 if not recipient_email:
                     st.warning("⚠️ 請輸入 Email")
                 elif not selected_files:
                     st.warning("⚠️ 請選擇檔案")
                 else:
-                    status_container = st.status("正在連線郵件伺服器...", expanded=True)
+                    # 使用 status 顯示進度
+                    status_container = st.status("🚀 系統運作中...", expanded=True)
+                    
                     try:
+                        # 顯示明顯的停止提示
+                        status_container.warning("⚠️ 正在傳輸資料，請勿關閉視窗...")
+                        status_container.error("🛑 若需【緊急終止】寄送，請直接按鍵盤 **F5** 或瀏覽器重新整理。")
+                        
                         if "email" in st.secrets:
                             sender_email = st.secrets["email"]["username"]
                             sender_password = st.secrets["email"]["password"]
                             
-                            status_container.write("📤 正在上傳附件並傳送中...")
+                            status_container.write("📤 正在上傳附件並連線 Gmail...")
                             
                             success, msg = send_email(recipient_email, selected_files, sender_email, sender_password)
                             
@@ -224,16 +224,20 @@ if st.session_state['generated_files']:
                     except Exception as e:
                         status_container.update(label="❌ 發生意外錯誤", state="error")
                         st.error(f"系統錯誤: {e}")
-                        add_log(recipient_email, "⚫ 中斷/錯誤", str(e))
+                        add_log(recipient_email, "⚫ 系統錯誤", str(e))
 
+# --- 歷史紀錄表單區 ---
 st.divider()
 st.subheader("📋 寄送歷史紀錄表")
 
 if st.session_state['mail_log']:
+    # 將資料轉為 DataFrame 以顯示表格
     df_log = pd.DataFrame(st.session_state['mail_log'])
+    
     st.dataframe(
-        df_log, 
+        df_log,
         use_container_width=True,
+        hide_index=True,  # 隱藏前面的 0,1,2 索引
         column_config={
             "日期時間": st.column_config.TextColumn("日期時間", width="medium"),
             "收件者信箱": st.column_config.TextColumn("收件者信箱", width="medium"),
@@ -242,4 +246,4 @@ if st.session_state['mail_log']:
         }
     )
 else:
-    st.info("尚無寄送紀錄。")
+    st.markdown("*目前尚無寄送紀錄 (無論成功或失敗都會顯示於此)*")
