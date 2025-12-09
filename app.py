@@ -3,6 +3,7 @@ import ffmpeg
 import os
 import smtplib
 import pandas as pd
+import streamlit.components.v1 as components # 新增這個元件來做強力按鈕
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
@@ -10,9 +11,9 @@ from email import encoders
 from datetime import datetime
 
 # --- 設定頁面資訊 ---
-st.set_page_config(page_title="音檔切割與寄送系統 (V8)", page_icon="📮", layout="wide")
+st.set_page_config(page_title="音檔切割與寄送系統 (V9)", page_icon="📮", layout="wide")
 st.title("📮 智慧音檔切割與寄送系統")
-st.caption("🚀 核心 V8：新增「永久歷史紀錄資料庫」與「手機版操作優化」。")
+st.caption("🚀 核心 V9：新增「手機版強制停止按鈕」與「永久紀錄」。")
 
 # 設定分割門檻 (MB)
 SPLIT_LIMIT_MB = 10 
@@ -36,13 +37,11 @@ def add_log(recipient, status, message):
         "詳細訊息": message
     }
     
-    # 讀取舊資料 -> 加入新資料 -> 存檔
     df = load_log()
-    # 使用 concat 取代 append (新版 pandas 規範)
+    # 使用 concat
     df = pd.concat([pd.DataFrame([new_data]), df], ignore_index=True)
     df.to_csv(LOG_FILE, index=False)
     
-    # 更新 Session State 以便即時顯示
     st.session_state['mail_log_df'] = df
 
 # --- 初始化 Session State ---
@@ -53,7 +52,7 @@ if 'last_uploaded_file_id' not in st.session_state:
 if 'generated_files' not in st.session_state:
     st.session_state['generated_files'] = []
 
-# --- 核心邏輯函式區 (維持穩定) ---
+# --- 核心邏輯函式區 ---
 
 def get_audio_info(file_path):
     try:
@@ -144,12 +143,10 @@ def send_email(to_email, selected_files, sender_email, sender_password):
 with st.sidebar:
     st.header("⚙️ 設定與工具")
     
-    # 需求 3：清除重來 (只清空檔案，不刪紀錄)
+    # 清除重來按鈕
     if st.button("🔄 清除重來 (Start Over)", type="primary"):
-        # 清空 session state 中的檔案相關變數
         st.session_state['generated_files'] = []
         st.session_state['last_uploaded_file_id'] = None
-        # 強制重新執行頁面
         st.rerun()
         
     st.info("💡 **操作提示：**\n點擊上方「清除重來」可刪除當前上傳的檔案並重新開始。歷史紀錄將永久保存。")
@@ -158,7 +155,6 @@ with st.sidebar:
 uploaded_file = st.file_uploader(f"第一步：上傳錄音檔 (若超過 {SPLIT_LIMIT_MB}MB 將自動分割)", type=None)
 
 if uploaded_file is not None:
-    # 檢測新檔案
     current_file_id = f"{uploaded_file.name}-{uploaded_file.size}"
     
     if st.session_state['last_uploaded_file_id'] != current_file_id:
@@ -206,23 +202,54 @@ if st.session_state['generated_files']:
             st.subheader("第三步：寄送設定")
             recipient_email = st.text_input("收件者信箱", placeholder="name@example.com")
             
-            # 需求 2：停止鍵說明 (手機友善版)
+            # 寄送按鈕
             if st.button("🚀 確認寄送檔案", type="primary", use_container_width=True):
                 if not recipient_email:
                     st.warning("⚠️ 請輸入 Email")
                 elif not selected_files:
                     st.warning("⚠️ 請選擇檔案")
                 else:
-                    status_container = st.status("🚀 準備開始...", expanded=True)
+                    # 狀態框
+                    status_container = st.status("🚀 系統運作中...", expanded=True)
+                    
                     try:
-                        # 明顯的紅色停止區塊
-                        status_container.error("🛑 **【如何停止寄送？】**")
-                        status_container.markdown("""
-                        - **電腦版**：請按鍵盤 **F5**。
-                        - **手機版**：請點擊瀏覽器網址列旁的 **「重新整理 (⟳)」** 或 **「停止 (X)」** 圖示。
-                        *(歷史紀錄將會自動保存)*
-                        """)
+                        # --- 核心修改：嵌入一個 HTML/JS 強力停止按鈕 ---
+                        # 這個按鈕會直接執行瀏覽器的 reload()，達到強制停止的效果
+                        stop_button_html = """
+                            <style>
+                                .stop-btn {
+                                    background-color: #ff4b4b;
+                                    color: white;
+                                    padding: 10px 24px;
+                                    border: none;
+                                    border-radius: 8px;
+                                    cursor: pointer;
+                                    font-size: 16px;
+                                    font-weight: bold;
+                                    width: 100%;
+                                    margin-bottom: 10px;
+                                }
+                                .stop-btn:hover {
+                                    background-color: #ff0000;
+                                }
+                            </style>
+                            <button class="stop-btn" onclick="window.parent.location.reload();">
+                                🛑 強制停止寄送 (STOP)
+                            </button>
+                            <div style="text-align: center; color: #666; font-size: 12px;">
+                                (點擊此按鈕可立即中斷傳輸)
+                            </div>
+                        """
                         
+                        # 將按鈕顯示在狀態框中
+                        status_container.markdown("### 正在處理中...")
+                        status_container.warning("⚠️ 若需中斷，請點擊下方紅色按鈕：")
+                        
+                        # 使用 components 渲染 HTML 按鈕
+                        with status_container:
+                            components.html(stop_button_html, height=100)
+                        
+                        # 執行寄送
                         if "email" in st.secrets:
                             sender_email = st.secrets["email"]["username"]
                             sender_password = st.secrets["email"]["password"]
@@ -254,7 +281,6 @@ col_hist, col_btn = st.columns([8, 2])
 with col_hist:
     st.subheader("📋 寄送歷史紀錄 (永久保存)")
 
-# 讀取並顯示 CSV 中的資料
 df_display = load_log()
 
 if not df_display.empty:
