@@ -13,6 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="音檔切割小幫手 (FFmpeg版)", page_icon="✂️")
 st.title("✂️ 智慧音檔切割與寄送系統")
 st.caption("🚀 核心已升級為 FFmpeg 引擎，不受 Python 版本限制。")
+st.caption("💡 若按鈕無反應，請務必 **關閉瀏覽器的自動翻譯**。")
 
 # --- 核心邏輯函式區 (FFmpeg Direct) ---
 
@@ -24,7 +25,6 @@ def get_audio_info(file_path):
         size = float(probe['format']['size'])
         return duration, size
     except ffmpeg.Error as e:
-        st.error(f"讀取音訊資訊失敗: {e.stderr}")
         return None, None
 
 def split_audio_ffmpeg(input_path, target_size_mb=9.5):
@@ -34,6 +34,7 @@ def split_audio_ffmpeg(input_path, target_size_mb=9.5):
     """
     duration, size_bytes = get_audio_info(input_path)
     if not duration:
+        st.error("無法讀取音訊資訊")
         return []
 
     target_bytes = target_size_mb * 1024 * 1024
@@ -73,11 +74,11 @@ def split_audio_ffmpeg(input_path, target_size_mb=9.5):
         return generated_files
         
     except ffmpeg.Error as e:
-        st.error(f"切割失敗: {e.stderr.decode('utf8')}")
+        st.error(f"切割失敗: 請確認檔案格式正確。")
         return []
 
 def send_email(to_email, selected_files, sender_email, sender_password):
-    """發送 Email (維持不變)"""
+    """發送 Email"""
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = to_email
@@ -86,12 +87,13 @@ def send_email(to_email, selected_files, sender_email, sender_password):
 
     for filename in selected_files:
         # 從硬碟讀取檔案
-        with open(filename, "rb") as f:
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(f.read())
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', f"attachment; filename= {filename}")
-            msg.attach(part)
+        if os.path.exists(filename):
+            with open(filename, "rb") as f:
+                part = MIMEBase('application', 'octet-stream')
+                part.set_payload(f.read())
+                encoders.encode_base64(part)
+                part.add_header('Content-Disposition', f"attachment; filename= {filename}")
+                msg.attach(part)
 
     try:
         server = smtplib.SMTP('smtp.gmail.com', 587)
@@ -116,6 +118,7 @@ if uploaded_file is not None:
     
     # 只有當 session 是空的時候才執行切割
     if not st.session_state['generated_files']:
+        # 寫入暫存檔
         with open(temp_filename, "wb") as f:
             f.write(uploaded_file.getbuffer())
             
@@ -125,7 +128,7 @@ if uploaded_file is not None:
                 st.session_state['generated_files'] = files
                 st.success(f"切割完成！產生 {len(files)} 個檔案。")
             
-            # 清理暫存原始檔
+            # 清理暫存原始檔 (保留切割後的檔以便寄送)
             if os.path.exists(temp_filename):
                 os.remove(temp_filename)
 
@@ -135,9 +138,10 @@ if uploaded_file is not None:
         
         selected_files = []
         for f_name in st.session_state['generated_files']:
-            file_size = os.path.getsize(f_name) / (1024 * 1024)
-            if st.checkbox(f"{f_name} ({file_size:.2f} MB)", value=True):
-                selected_files.append(f_name)
+            if os.path.exists(f_name):
+                file_size = os.path.getsize(f_name) / (1024 * 1024)
+                if st.checkbox(f"{f_name} ({file_size:.2f} MB)", value=True):
+                    selected_files.append(f_name)
         
         st.subheader("第三步：輸入收件資訊")
         recipient_email = st.text_input("收件者信箱")
@@ -157,9 +161,6 @@ if uploaded_file is not None:
                             st.balloons()
                             st.success(msg)
                         else:
-                            st.error(msg)
+                            st.error(f"寄送失敗: {msg}")
                 except Exception as e:
-                    st.error(f"Secrets 設定錯誤或遺失: {e}")
-
-# 清理舊檔案機制 (可選)
-# 實際部署時，Streamlit Cloud 會定期重置，或可在這裡加入清理邏輯
+                    st.error("找不到 Secrets 設定，請檢查 Streamlit Cloud 設定。")
